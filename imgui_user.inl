@@ -70,14 +70,10 @@ void InspectActor ( const Lucy::UI::ActorRef& actor )
         auto ul = ImVec2(screen.getUpperLeft().x, screen.getUpperLeft().y);
         auto lr = ImVec2(screen.getLowerRight().x, screen.getLowerRight().y);
 
-        ImGuiState& g = *GImGui;
-
-        ui::SetNextWindowPos ( ImVec2 ( 0.0f, 0.0f ) );
-        ui::ScopedStyleColor color ( ImGuiCol_WindowBg, ImVec4 ( 0, 0, 0, 0 ) );
-        ui::ScopedWindow debug ( "##DebugStrokeLayer", ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoSavedSettings );
         {
-            g.OverlayDrawList.AddRectFilled ( ul, lr, ( actor->UID() | 0x11000000 ) );
-            g.OverlayDrawList.AddText ( ul, 0xFFFFFFFF, actor->GetName().c_str() );
+            ImGui::GetOverlayDrawList()->AddRect ( ul, lr, 0xFFFFFFFF );
+            ImGui::GetOverlayDrawList()->AddRectFilled ( ul, lr, ( actor->UID() | 0x11000000 ) );
+            ImGui::GetOverlayDrawList()->AddText ( ul + ImVec2(3, 3), 0xFFFFFFFF, actor->GetName().c_str() );
         }
     }
 
@@ -85,7 +81,10 @@ void InspectActor ( const Lucy::UI::ActorRef& actor )
     {
         if ( ui::DragFloat2(UI_PROP("Position"), &actor->PositionAnim()().x ) );
         if ( ui::DragFloat2(UI_PROP("Scale"), &actor->ScaleAnim()().x, 0.0f, -5.0f, 5.0f ) );
-        if ( ui::DragFloat(UI_PROP("Rotation"), &actor->RotationAnim()(), 0.0f, -M_PI, M_PI ) );
+        if ( ui::SliderAngle(UI_PROP("Rotation"), &actor->RotationAnim()() ) );
+        if ( ui::DragFloat(UI_PROP("Alpha"), &actor->AlphaAnim()(), 0.001f, 0.0f, 1.0f ) );
+        if ( ui::ColorEdit3(UI_PROP("Tint"), &actor->TintAnim()().r ) );
+        
         bool v = actor->IsVisible();
         if ( ui::Checkbox(UI_PROP("Visible"), &v ) ) actor->SetVisible(v);
         
@@ -100,8 +99,9 @@ void InspectActor ( const Lucy::UI::ActorRef& actor )
     }
 }
 
-void ImGui::SceneGraph ( )
-{ 
+void ImGui::SceneGraph ( bool forceAllOn )
+{
+    if ( forceAllOn ) Lucy::UI::Stage::GetStage()->Inspectable(true, true);
     InspectActor( Lucy::UI::Stage::GetStage() );
 }
 
@@ -165,12 +165,13 @@ bool ImGui::ColorPicker ( const char * label, float col[3] )
     
     SetNextWindowSize( ImVec2( texSize.y + 34, texSize.y + 14 ) );
     
+    ui::ScopedStyleColor color ( ImGuiCol_Border, ui::GetStyle().Colors[ImGuiCol_FrameBg] );
     if( BeginPopupContextItem( popupLabel.c_str() ) )
     {
         Image( svTex, ImVec2( texSize.x, texSize.y ) );
         
         ImGuiWindow* window = GetCurrentWindow();
-        window->DrawList->AddCircle( GetItemBoxMin() + ImVec2( texSize.x * hsv.y, texSize.y * ( 1.0f - hsv.z ) ), 3, 0xffffffff );
+        window->DrawList->AddCircle( GetItemRectMin() + ImVec2( texSize.x * hsv.y, texSize.y * ( 1.0f - hsv.z ) ), 3, 0xffffffff );
         if( IsItemHovered() && IsMouseDown( 0 ) )
         {
             hsv.y           = (float) ( GetMousePos().x - GetItemRectMin().x ) / (float) GetItemRectSize().x;
@@ -182,9 +183,9 @@ bool ImGui::ColorPicker ( const char * label, float col[3] )
         SameLine();
         Image( hueTex, ImVec2( 10, texSize.y ) );
         
-        float hueY = hsv.x * (float) GetItemRectSize().y + GetItemBoxMin().y;
-        window->DrawList->AddTriangleFilled( ImVec2( GetItemBoxMin().x - 3, hueY - 3 ), ImVec2( GetItemBoxMin().x - 3, hueY + 3 ), ImVec2( GetItemBoxMin().x + 1, hueY ), 0xffffffff );
-        window->DrawList->AddTriangleFilled( ImVec2( GetItemBoxMax().x + 3, hueY - 3 ), ImVec2( GetItemBoxMax().x + 3, hueY + 3 ), ImVec2( GetItemBoxMax().x - 1, hueY ), 0xffffffff );
+        float hueY = hsv.x * (float) GetItemRectSize().y + GetItemRectMin().y;
+        window->DrawList->AddTriangleFilled( ImVec2( GetItemRectMin().x - 3, hueY - 3 ), ImVec2( GetItemRectMin().x - 3, hueY + 3 ), ImVec2( GetItemRectMin().x + 1, hueY ), 0xffffffff );
+        window->DrawList->AddTriangleFilled( ImVec2( GetItemRectMax().x + 3, hueY - 3 ), ImVec2( GetItemRectMax().x + 3, hueY + 3 ), ImVec2( GetItemRectMax().x - 1, hueY ), 0xffffffff );
         if( IsItemHovered() && IsMouseDown( 0 ) )
         {
             hsv.x   = (float) ( GetMousePos().y - GetItemRectMin().y ) / (float) GetItemRectSize().y;
@@ -222,7 +223,12 @@ const float kRowHeight    = 19.0f;
 
 namespace ImGui
 {
-    float Snap ( float value, float period, float min = 0.0f, float max = kMaxTimelineValueCached )
+    ImDrawList * GetOverlayDrawList ( )
+    {
+        return &GImGui->OverlayDrawList;
+    }
+    
+    float Snap ( float value, float period, float min = 0.0f, float max = kTimelineGlobals.kMaxTimelineValueCached )
     {
         float halfPeriod = period * 0.5f;
         return glm::clamp ( ( value ) - ( fmodf ( value + halfPeriod, period ) ), min - halfPeriod, max - halfPeriod ) + halfPeriod;
@@ -236,11 +242,9 @@ namespace ImGui
         
         kTimelineGlobals.kMaxTimelineValueCached    = *totalTime;
         kTimelineGlobals.kBaseCursorPos             = GetCursorPos();
-
-        return true;
     }
     
-    bool TimelineEvent ( const char * str_id, float * values )
+    bool TimelineEvent ( const char * str_id, float * values, int /*numValues*/ )
     {
         ui::ScopedStyleVar spacing ( ImGuiStyleVar_ItemSpacing, ImVec2 ( 6, 6 ) );
         ui::ScopedStyleVar padding ( ImGuiStyleVar_WindowPadding, ImVec2 ( 0, 0 ) );
@@ -390,7 +394,10 @@ namespace ImGui
             draw->AddText ( b - textOffset + extraTextOffset, textColor, tmp);
         }
         
-        if ( !kTimelineGlobals.kDidDragItemThisFrame && IsMouseHoveringWindow() && IsMouseDragging(0) )
+        auto rectLow  = GetWindowPos() + kTimelineGlobals.kBaseCursorPos;
+        auto rectHigh = GetWindowPos() + GetWindowSize();
+        
+        if ( !kTimelineGlobals.kDidDragItemThisFrame && IsMouseHoveringRect( rectLow, rectHigh ) && IsMouseDragging(0) )
         {
             float r = glm::clamp( ( ( GetMousePos().x ) - x0 ) / ( x1 - x0 ), 0.0f, 1.0f );
             float newTime = r * *kTimelineGlobals.kMaxTimelineValue;
